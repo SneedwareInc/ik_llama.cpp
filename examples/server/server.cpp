@@ -1026,6 +1026,13 @@ else {
                         ban_bias = data["banned_bias"].get<float>();
                     }
 
+                    // Token Limit Tracking
+                    int original_n_predict = -1;
+                    if (data.contains("n_predict") && data["n_predict"].is_number_integer()) {
+                        original_n_predict = data["n_predict"].get<int>();
+                    }
+                    int total_tokens_streamed = 0;
+
                     // ============================================================
                     // FAST PATH: No banned strings -> No buffering
                     // ============================================================
@@ -1254,6 +1261,14 @@ else {
                                             ctx_server.queue_results.remove_waiting_task_id(current_task_id);
                                             return false;
                                         }
+                                        
+                                        total_tokens_streamed++;
+                                        if (original_n_predict > 0 && total_tokens_streamed >= original_n_predict) {
+                                            ctx_server.request_cancel(current_task_id);
+                                            ctx_server.queue_results.remove_waiting_task_id(current_task_id);
+                                            successful_completion = true;
+                                            goto cleanup;
+                                        }
                                     }
 
                                     // 2. Identify Guilty Token & Add to Bans
@@ -1317,6 +1332,37 @@ else {
 
                                         // 5. RESUME STEP: Continue generation normally
                                         json resume_data = data;
+                                        bool stop_after_fix = false;
+                                        
+                                        if (original_n_predict > 0) {
+                                            int pending = 1; // The fix token we just generated
+                                            if (total_tokens_streamed + pending >= original_n_predict) {
+                                                stop_after_fix = true;
+                                            } else {
+                                                resume_data["n_predict"] = original_n_predict - (total_tokens_streamed + pending);
+                                            }
+                                        }
+
+                                        if (stop_after_fix) {
+                                            // We reached the limit with the fix token. Flush it and stop.
+                                            token_buffer.clear();
+                                            token_buffer.push_back(fix_token_json);
+                                            
+                                            while (!token_buffer.empty()) {
+                                                json& item = token_buffer.front();
+                                                if (item.contains("__raw_token_id")) item.erase("__raw_token_id");
+                                                if (!sse(item)) {
+                                                    ctx_server.request_cancel(*active_task_id);
+                                                    ctx_server.queue_results.remove_waiting_task_id(*active_task_id);
+                                                    return false;
+                                                }
+                                                total_tokens_streamed++;
+                                                token_buffer.pop_front();
+                                            }
+                                            successful_completion = true;
+                                            goto cleanup;
+                                        }
+
                                         resume_data["prompt"] = current_prompt_str + fix_content;
 
                                         current_task_id = ctx_server.queue_tasks.get_new_id();
@@ -1357,7 +1403,16 @@ else {
                                         ctx_server.queue_results.remove_waiting_task_id(current_task_id);
                                         return false;
                                     }
+                                    
+                                    total_tokens_streamed++;
                                     token_buffer.pop_front();
+
+                                    if (original_n_predict > 0 && total_tokens_streamed >= original_n_predict) {
+                                        ctx_server.request_cancel(current_task_id);
+                                        ctx_server.queue_results.remove_waiting_task_id(current_task_id);
+                                        successful_completion = true;
+                                        goto cleanup;
+                                    }
                                 }
                             }
 
@@ -1373,6 +1428,7 @@ else {
                         }
                     }
 
+                    cleanup:
                     bool ok = true;
                     if (successful_completion && oaicompat != OAICOMPAT_TYPE_ANTHROPIC && oaicompat != OAICOMPAT_TYPE_NONE) {
                         static const std::string done_message = "data: [DONE]\n\n";
