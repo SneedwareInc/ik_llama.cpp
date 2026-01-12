@@ -962,6 +962,31 @@ int main(int argc, char ** argv) {
                 inputs = tokenize_input_prompts(llama_get_vocab(ctx_server.ctx), ctx_server.mctx, prompt, true, true);
             }
             const auto completion_id = gen_chatcmplid();
+            auto validate_regex_list = [&](const std::string& field_name) -> std::string {
+                if (data.contains(field_name) && data[field_name].is_array()) {
+                    for (const auto& val : data[field_name]) {
+                        if (val.is_string()) {
+                            std::string s = val.get<std::string>();
+                            if (!s.empty()) {
+                                try {
+                                    std::regex re(s);
+                                } catch (const std::regex_error& e) {
+                                    return s;
+                                }
+                            }
+                        }
+                    }
+                }
+                return "";
+            };
+
+            std::string invalid_re = validate_regex_list("banned_regex");
+            if (invalid_re.empty()) invalid_re = validate_regex_list("banned_regex_case_insensitive");
+            
+            if (!invalid_re.empty()) {
+                res_error(res, format_error_response("Invalid regex: " + invalid_re, ERROR_TYPE_INVALID_REQUEST));
+                return;
+            }
             const int id_task = ctx_server.queue_tasks.get_new_id();
 
             ctx_server.queue_results.add_waiting_task_id(id_task);
@@ -1026,56 +1051,29 @@ else {
                         return a.length() > b.length();
                     });
 
-                    // Banned Regex & Case Insensitive Regex
+                    // Banned Regex (Case Sensitive & Insensitive)
                     std::vector<std::string> regex_patterns; // For buffer size calculation
                     std::vector<std::regex> stop_regexes;    // Compiled regexes
 
-                    // Helper to parse and compile regex
-                    auto add_regex_list = [&](const std::string& field_name, bool case_insensitive) -> bool {
+                    auto add_regex_list = [&](const std::string& field_name, bool case_insensitive) {
                         if (data.contains(field_name) && data[field_name].is_array()) {
                             for (const auto& val : data[field_name]) {
                                 if (val.is_string()) {
                                     std::string s = val.get<std::string>();
                                     if (!s.empty()) {
-                                        try {
-                                            auto flags = std::regex_constants::ECMAScript;
-                                            if (case_insensitive) flags |= std::regex_constants::icase;
-                                            
-                                            stop_regexes.emplace_back(s, flags);
-                                            regex_patterns.push_back(s);
-                                        } catch (const std::regex_error& e) {
-                                            // Error handling: Send JSON error and abort
-                                            std::cerr << "Invalid regex in " << field_name << ": " << s << std::endl;
-                                            std::string error_msg = json({
-                                                {"error", {
-                                                    {"message", "Invalid regex provided: " + s},
-                                                    {"type", "invalid_request_error"},
-                                                    {"code", 400}
-                                                }}
-                                            }).dump();
-                                            sink.write(error_msg.c_str(), error_msg.size());
-                                            return false;
-                                        }
+                                        auto flags = std::regex_constants::ECMAScript;
+                                        if (case_insensitive) flags |= std::regex_constants::icase;
+                                        stop_regexes.emplace_back(s, flags);
+                                        regex_patterns.push_back(s);
                                     }
                                 }
                             }
                         }
-                        return true;
                     };
 
-                    // Process "banned_regex" (Case Sensitive)
-                    if (!add_regex_list("banned_regex", false)) {
-                        ctx_server.request_cancel(id_task);
-                        ctx_server.queue_results.remove_waiting_task_id(id_task);
-                        return false;
-                    }
-
-                    // Process "banned_regex_case_insensitive" (Case Insensitive)
-                    if (!add_regex_list("banned_regex_case_insensitive", true)) {
-                        ctx_server.request_cancel(id_task);
-                        ctx_server.queue_results.remove_waiting_task_id(id_task);
-                        return false;
-                    }
+                    // We assume validation passed in handle_completions_impl, so no try-catch needed here
+                    add_regex_list("banned_regex", false);
+                    add_regex_list("banned_regex_case_insensitive", true);
 
                     // Logit Bias Penalty (Default: -999.0)
                     float ban_bias = -999.0f;
@@ -1301,7 +1299,7 @@ else {
                                 }
                             }
 
-                            // B. Check Regex (Case Sensitive or Insensitive based on compilation)
+                            // B. Check Regex
                             for (size_t i = 0; i < stop_regexes.size(); ++i) {
                                 std::smatch match;
                                 // We search the raw buffer_text
