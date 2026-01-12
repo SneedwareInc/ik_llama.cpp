@@ -982,7 +982,7 @@ int main(int argc, char ** argv) {
 
             std::string invalid_re = validate_regex_list("banned_regex");
             if (invalid_re.empty()) invalid_re = validate_regex_list("banned_regex_case_insensitive");
-            
+
             if (!invalid_re.empty()) {
                 res_error(res, format_error_response("Invalid regex: " + invalid_re, ERROR_TYPE_INVALID_REQUEST));
                 return;
@@ -1024,7 +1024,7 @@ else {
                 // Capture 'data' by value to use as a template for retries
                 const auto chunked_content_provider = [id_task, active_task_id, &ctx_server, completion_id, oaicompat, send_done = params.send_done, data](size_t, httplib::DataSink& sink) mutable {
                     bool successful_completion = false;
-                    
+
                     const auto sse = [oaicompat, &sink](const json &res) {
                         if (oaicompat == OAICOMPAT_TYPE_ANTHROPIC) {
                             return server_sent_anthropic_event(sink, res);
@@ -1034,7 +1034,7 @@ else {
                     };
 
                     // 1. Parse Configuration from Request
-                    
+
                     // Banned Strings
                     std::vector<std::string> stop_phrases;
                     if (data.contains("banned_strings") && data["banned_strings"].is_array()) {
@@ -1139,7 +1139,7 @@ else {
                                 return false;
                             }
                         }
-                    } 
+                    }
                     // ============================================================
                     // SLOW PATH: Buffering and Banning Logic
                     // ============================================================
@@ -1158,19 +1158,19 @@ else {
                             for (const auto& pat : regex_patterns) {
                                 if (pat.length() > max_len) max_len = pat.length();
                             }
-                            
+
                             // Default: Longest string/regex + 1
                             BUFFER_SIZE = std::max((size_t)1, max_len + 1);
                         }
-                        
+
                         // Initialize Buffer & State
                         std::deque<json> token_buffer;
-                        
+
                         int current_task_id = id_task;
-                        
+
                         // Track bans specifically for the current "next token" to be generated.
                         std::set<int> current_step_bans;
-                        int ban_slot_index = -1; 
+                        int ban_slot_index = -1;
 
                         // Track the text that has been confirmed/sent to the client.
                         std::string current_prompt_str = "";
@@ -1191,7 +1191,7 @@ else {
                                 auto val = j["content"];
                                 if (val.is_string()) return val.get<std::string>();
                             }
-                            return ""; 
+                            return "";
                         };
 
                         // Helper to extract Token ID
@@ -1237,10 +1237,10 @@ else {
 
                             // Receive from the CURRENT task ID
                             server_task_result result = ctx_server.queue_results.recv(current_task_id);
-                            
+
                             std::vector<json> items_to_buffer;
-                            json raw_item = result.data; 
-                            
+                            json raw_item = result.data;
+
                             if (!result.error) {
                                 result.oaicompat = oaicompat;
                                 result.oaicompat_cmpl_id = completion_id;
@@ -1275,15 +1275,15 @@ else {
 
                             // 3. Check for Stop Phrases (Strings & Regex)
                             std::string buffer_text = "";
-                            std::vector<size_t> token_offsets; 
-                            
+                            std::vector<size_t> token_offsets;
+
                             for (const auto& item : token_buffer) {
                                 token_offsets.push_back(buffer_text.length());
                                 buffer_text += get_content_str(item);
                             }
 
                             std::string buffer_lower = to_lower_str(buffer_text);
-                            
+
                             size_t match_pos = std::string::npos;
                             std::string detected_phrase = "";
 
@@ -1334,7 +1334,7 @@ else {
                                     // 1. Construct prompt from good tokens (DO NOT FLUSH)
                                     std::string temp_prompt_suffix = "";
                                     std::deque<json> good_tokens;
-                                    
+
                                     for (size_t i = 0; i < split_index; ++i) {
                                         json& item = token_buffer[i];
                                         if (item.contains("__raw_token_id")) item.erase("__raw_token_id");
@@ -1358,7 +1358,7 @@ else {
                                             current_step_bans.clear();
                                             ban_slot_index = (int)split_index;
                                         }
-                                        
+
                                         current_step_bans.insert(guilty_token_id);
                                         std::cout << "Debug: Banning token ID " << guilty_token_id << " at slot " << split_index << ". Total bans: " << current_step_bans.size() << std::endl;
 
@@ -1369,18 +1369,18 @@ else {
                                         // 4. FIX STEP: Generate 1 token with ALL current bans
                                         json fix_data = data;
                                         fix_data["prompt"] = current_prompt_str + temp_prompt_suffix;
-                                        fix_data["n_predict"] = 1; 
-                                        
+                                        fix_data["n_predict"] = 1;
+
                                         if (!fix_data.contains("logit_bias")) fix_data["logit_bias"] = json::array();
-                                        
+
                                         for (int banned_id : current_step_bans) {
                                             fix_data["logit_bias"].push_back(json::array({banned_id, ban_bias}));
                                         }
-                                        
+
                                         int id_fix = ctx_server.queue_tasks.get_new_id();
                                         *active_task_id = id_fix; // Update shared state for fix task
                                         ctx_server.queue_results.add_waiting_task_id(id_fix);
-                                        
+
                                         std::vector<server_tokens> fix_inputs = tokenize_input_prompts(
                                             llama_get_vocab(ctx_server.ctx), ctx_server.mctx, fix_data["prompt"], true, true
                                         );
@@ -1393,7 +1393,7 @@ else {
                                         // Process fix token
                                         json fix_token_json;
                                         json raw_fix = fix_result.data;
-                                        
+
                                         fix_result.oaicompat = oaicompat;
                                         fix_result.oaicompat_cmpl_id = completion_id;
                                         if (oaicompat) {
@@ -1402,7 +1402,7 @@ else {
                                         } else {
                                             fix_token_json = fix_result.data;
                                         }
-                                        
+
                                         if (raw_fix.contains("token")) fix_token_json["__raw_token_id"] = raw_fix["token"];
 
                                         std::string fix_content = get_content_str(fix_token_json);
@@ -1410,9 +1410,9 @@ else {
                                         // 5. RESUME STEP: Continue generation normally
                                         json resume_data = data;
                                         bool stop_after_fix = false;
-                                        
+
                                         if (original_n_predict > 0) {
-                                            int pending = good_tokens.size() + 1; 
+                                            int pending = good_tokens.size() + 1;
                                             if (total_tokens_streamed + pending >= original_n_predict) {
                                                 stop_after_fix = true;
                                             } else {
@@ -1423,7 +1423,7 @@ else {
                                         if (stop_after_fix) {
                                             token_buffer = good_tokens;
                                             token_buffer.push_back(fix_token_json);
-                                            
+
                                             while (!token_buffer.empty()) {
                                                 json& item = token_buffer.front();
                                                 if (item.contains("__raw_token_id")) item.erase("__raw_token_id");
@@ -1444,7 +1444,7 @@ else {
                                         current_task_id = ctx_server.queue_tasks.get_new_id();
                                         *active_task_id = current_task_id; // Update shared state for resume task
                                         ctx_server.queue_results.add_waiting_task_id(current_task_id);
-                                        
+
                                         std::vector<server_tokens> resume_inputs = tokenize_input_prompts(
                                             llama_get_vocab(ctx_server.ctx), ctx_server.mctx, resume_data["prompt"], true, true
                                         );
@@ -1453,7 +1453,7 @@ else {
                                         // 6. Update Buffer: Good Tokens + Fix Token
                                         token_buffer = good_tokens;
                                         token_buffer.push_back(fix_token_json);
-                                        
+
                                         continue;
                                     }
                                 }
@@ -1472,16 +1472,16 @@ else {
                                     if (item_to_send.contains("__raw_token_id")) item_to_send.erase("__raw_token_id");
 
                                     current_prompt_str += get_content_str(item_to_send);
-                                    
-                                    current_step_bans.clear(); 
+
+                                    current_step_bans.clear();
                                     ban_slot_index = -1;
-                                    
+
                                     if (!sse(item_to_send)) {
                                         ctx_server.request_cancel(current_task_id);
                                         ctx_server.queue_results.remove_waiting_task_id(current_task_id);
                                         return false;
                                     }
-                                    
+
                                     total_tokens_streamed++;
                                     token_buffer.pop_front();
 
@@ -1516,10 +1516,10 @@ else {
                         }
                     }
                     sink.done();
-                    
+
                     // Cleanup the active task ID (which might be different from id_task in slow path)
                     ctx_server.queue_results.remove_waiting_task_id(*active_task_id);
-                    
+
                     return ok;
                 };
 
