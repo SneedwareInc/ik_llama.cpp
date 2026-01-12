@@ -35,6 +35,7 @@
 #ifdef SQLITE3_MODERN_CPP_SUPPORT
 #include <sqlite_modern_cpp.h>
 #include <deque>
+#include <regex>
 
 struct DatabaseHandle {
     sqlite::database db;
@@ -1020,10 +1021,72 @@ else {
                         }
                     }
 
+                    // Sort banned strings by length (descending)
+                    std::sort(stop_phrases.begin(), stop_phrases.end(), [](const std::string& a, const std::string& b) {
+                        return a.length() > b.length();
+                    });
+
+                    // Banned Regex & Case Insensitive Regex
+                    std::vector<std::string> regex_patterns; // For buffer size calculation
+                    std::vector<std::regex> stop_regexes;    // Compiled regexes
+
+                    // Helper to parse and compile regex
+                    auto add_regex_list = [&](const std::string& field_name, bool case_insensitive) -> bool {
+                        if (data.contains(field_name) && data[field_name].is_array()) {
+                            for (const auto& val : data[field_name]) {
+                                if (val.is_string()) {
+                                    std::string s = val.get<std::string>();
+                                    if (!s.empty()) {
+                                        try {
+                                            auto flags = std::regex_constants::ECMAScript;
+                                            if (case_insensitive) flags |= std::regex_constants::icase;
+                                            
+                                            stop_regexes.emplace_back(s, flags);
+                                            regex_patterns.push_back(s);
+                                        } catch (const std::regex_error& e) {
+                                            // Error handling: Send JSON error and abort
+                                            std::cerr << "Invalid regex in " << field_name << ": " << s << std::endl;
+                                            std::string error_msg = json({
+                                                {"error", {
+                                                    {"message", "Invalid regex provided: " + s},
+                                                    {"type", "invalid_request_error"},
+                                                    {"code", 400}
+                                                }}
+                                            }).dump();
+                                            sink.write(error_msg.c_str(), error_msg.size());
+                                            return false;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        return true;
+                    };
+
+                    // Process "banned_regex" (Case Sensitive)
+                    if (!add_regex_list("banned_regex", false)) {
+                        ctx_server.request_cancel(id_task);
+                        ctx_server.queue_results.remove_waiting_task_id(id_task);
+                        return false;
+                    }
+
+                    // Process "banned_regex_case_insensitive" (Case Insensitive)
+                    if (!add_regex_list("banned_regex_case_insensitive", true)) {
+                        ctx_server.request_cancel(id_task);
+                        ctx_server.queue_results.remove_waiting_task_id(id_task);
+                        return false;
+                    }
+
                     // Logit Bias Penalty (Default: -999.0)
                     float ban_bias = -999.0f;
                     if (data.contains("banned_bias") && data["banned_bias"].is_number()) {
                         ban_bias = data["banned_bias"].get<float>();
+                    }
+
+                    // Manual Buffer Size
+                    size_t manual_buffer_size = 0;
+                    if (data.contains("banbuffer_size") && data["banbuffer_size"].is_number_unsigned()) {
+                        manual_buffer_size = data["banbuffer_size"].get<size_t>();
                     }
 
                     // Token Limit Tracking
@@ -1034,9 +1097,9 @@ else {
                     int total_tokens_streamed = 0;
 
                     // ============================================================
-                    // FAST PATH: No banned strings -> No buffering
+                    // FAST PATH: No banned strings AND No regex -> No buffering
                     // ============================================================
-                    if (stop_phrases.empty()) {
+                    if (stop_phrases.empty() && stop_regexes.empty()) {
                         while (true) {
                             server_task_result result = ctx_server.queue_results.recv(id_task);
                             if (!result.error) {
@@ -1083,16 +1146,24 @@ else {
                     // SLOW PATH: Buffering and Banning Logic
                     // ============================================================
                     else {
-                        // Calculate Buffer Size: Exactly the length of the longest banned string
-                        size_t max_banned_char_len = 0;
-                        for (const auto& phrase : stop_phrases) {
-                            if (phrase.length() > max_banned_char_len) {
-                                max_banned_char_len = phrase.length();
+                        // Calculate Buffer Size
+                        size_t BUFFER_SIZE;
+                        if (manual_buffer_size > 0) {
+                            BUFFER_SIZE = manual_buffer_size;
+                        } else {
+                            size_t max_len = 0;
+                            // Check strings
+                            if (!stop_phrases.empty()) {
+                                max_len = stop_phrases[0].length(); // First is longest due to sort
                             }
+                            // Check regex patterns
+                            for (const auto& pat : regex_patterns) {
+                                if (pat.length() > max_len) max_len = pat.length();
+                            }
+                            
+                            // Default: Longest string/regex + 1
+                            BUFFER_SIZE = std::max((size_t)1, max_len + 1);
                         }
-
-                        // Ensure at least 1 to function as a buffer
-                        const size_t BUFFER_SIZE = std::max((size_t)1, max_banned_char_len);
                         
                         // Initialize Buffer & State
                         std::deque<json> token_buffer;
@@ -1101,6 +1172,7 @@ else {
                         
                         // Track bans specifically for the current "next token" to be generated.
                         std::set<int> current_step_bans;
+                        int ban_slot_index = -1; 
 
                         // Track the text that has been confirmed/sent to the client.
                         std::string current_prompt_str = "";
@@ -1203,7 +1275,7 @@ else {
 
                             print_debug_buffer(token_buffer);
 
-                            // 3. Check for Stop Phrases
+                            // 3. Check for Stop Phrases (Strings & Regex)
                             std::string buffer_text = "";
                             std::vector<size_t> token_offsets; 
                             
@@ -1217,7 +1289,7 @@ else {
                             size_t match_pos = std::string::npos;
                             std::string detected_phrase = "";
 
-                            // Iterate over the dynamic list of stop phrases
+                            // A. Check Strings (Case Insensitive)
                             for (const auto& phrase : stop_phrases) {
                                 std::string target_lower = to_lower_str(phrase);
                                 size_t pos = buffer_lower.find(target_lower);
@@ -1225,6 +1297,19 @@ else {
                                     if (match_pos == std::string::npos || pos < match_pos) {
                                         match_pos = pos;
                                         detected_phrase = phrase;
+                                    }
+                                }
+                            }
+
+                            // B. Check Regex (Case Sensitive or Insensitive based on compilation)
+                            for (size_t i = 0; i < stop_regexes.size(); ++i) {
+                                std::smatch match;
+                                // We search the raw buffer_text
+                                if (std::regex_search(buffer_text, match, stop_regexes[i])) {
+                                    size_t pos = match.position(0);
+                                    if (match_pos == std::string::npos || pos < match_pos) {
+                                        match_pos = pos;
+                                        detected_phrase = "REGEX:" + regex_patterns[i];
                                     }
                                 }
                             }
@@ -1248,27 +1333,15 @@ else {
                                 }
 
                                 if (found_split) {
-                                    // 1. Flush good tokens
+                                    // 1. Construct prompt from good tokens (DO NOT FLUSH)
+                                    std::string temp_prompt_suffix = "";
+                                    std::deque<json> good_tokens;
+                                    
                                     for (size_t i = 0; i < split_index; ++i) {
                                         json& item = token_buffer[i];
                                         if (item.contains("__raw_token_id")) item.erase("__raw_token_id");
-                                        
-                                        current_prompt_str += get_content_str(item);
-                                        current_step_bans.clear(); 
-                                        
-                                        if (!sse(item)) {
-                                            ctx_server.request_cancel(current_task_id);
-                                            ctx_server.queue_results.remove_waiting_task_id(current_task_id);
-                                            return false;
-                                        }
-                                        
-                                        total_tokens_streamed++;
-                                        if (original_n_predict > 0 && total_tokens_streamed >= original_n_predict) {
-                                            ctx_server.request_cancel(current_task_id);
-                                            ctx_server.queue_results.remove_waiting_task_id(current_task_id);
-                                            successful_completion = true;
-                                            goto cleanup;
-                                        }
+                                        temp_prompt_suffix += get_content_str(item);
+                                        good_tokens.push_back(item);
                                     }
 
                                     // 2. Identify Guilty Token & Add to Bans
@@ -1282,8 +1355,14 @@ else {
                                     }
 
                                     if (guilty_token_id != -1) {
+                                        // Check if we are banning a different slot than before
+                                        if (ban_slot_index != (int)split_index) {
+                                            current_step_bans.clear();
+                                            ban_slot_index = (int)split_index;
+                                        }
+                                        
                                         current_step_bans.insert(guilty_token_id);
-                                        std::cout << "Debug: Banning token ID " << guilty_token_id << " for this spot. Total bans: " << current_step_bans.size() << std::endl;
+                                        std::cout << "Debug: Banning token ID " << guilty_token_id << " at slot " << split_index << ". Total bans: " << current_step_bans.size() << std::endl;
 
                                         // 3. Cancel current task
                                         ctx_server.request_cancel(current_task_id);
@@ -1291,7 +1370,7 @@ else {
 
                                         // 4. FIX STEP: Generate 1 token with ALL current bans
                                         json fix_data = data;
-                                        fix_data["prompt"] = current_prompt_str;
+                                        fix_data["prompt"] = current_prompt_str + temp_prompt_suffix;
                                         fix_data["n_predict"] = 1; 
                                         
                                         if (!fix_data.contains("logit_bias")) fix_data["logit_bias"] = json::array();
@@ -1335,7 +1414,7 @@ else {
                                         bool stop_after_fix = false;
                                         
                                         if (original_n_predict > 0) {
-                                            int pending = 1; // The fix token we just generated
+                                            int pending = good_tokens.size() + 1; 
                                             if (total_tokens_streamed + pending >= original_n_predict) {
                                                 stop_after_fix = true;
                                             } else {
@@ -1344,8 +1423,7 @@ else {
                                         }
 
                                         if (stop_after_fix) {
-                                            // We reached the limit with the fix token. Flush it and stop.
-                                            token_buffer.clear();
+                                            token_buffer = good_tokens;
                                             token_buffer.push_back(fix_token_json);
                                             
                                             while (!token_buffer.empty()) {
@@ -1363,7 +1441,7 @@ else {
                                             goto cleanup;
                                         }
 
-                                        resume_data["prompt"] = current_prompt_str + fix_content;
+                                        resume_data["prompt"] = current_prompt_str + temp_prompt_suffix + fix_content;
 
                                         current_task_id = ctx_server.queue_tasks.get_new_id();
                                         *active_task_id = current_task_id; // Update shared state for resume task
@@ -1374,8 +1452,8 @@ else {
                                         );
                                         ctx_server.request_completion(current_task_id, -1, resume_data, false, false, std::move(resume_inputs[0]));
 
-                                        // 6. Update Buffer
-                                        token_buffer.clear();
+                                        // 6. Update Buffer: Good Tokens + Fix Token
+                                        token_buffer = good_tokens;
                                         token_buffer.push_back(fix_token_json);
                                         
                                         continue;
@@ -1396,7 +1474,9 @@ else {
                                     if (item_to_send.contains("__raw_token_id")) item_to_send.erase("__raw_token_id");
 
                                     current_prompt_str += get_content_str(item_to_send);
+                                    
                                     current_step_bans.clear(); 
+                                    ban_slot_index = -1;
                                     
                                     if (!sse(item_to_send)) {
                                         ctx_server.request_cancel(current_task_id);
