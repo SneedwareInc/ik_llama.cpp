@@ -905,18 +905,12 @@ ggml_tensor * llm_build_context::build_deepseek2_layer_attention(
             ggml_tensor * kv_cache_trans = nullptr;
 
             if (lctx.cparams.mla_attn == 1 && !lctx.cparams.flash_attn) {
-                ggml_tensor * kv_cache_trans_view = ggml_view_2d(ctx0, kv_self.v_l[il], n_tokens, kv_lora_rank,
-                        ggml_row_size(kv_self.v_l[il]->type, kv_self.size), ggml_row_size(kv_self.v_l[il]->type, kv_head));
-                cb(kv_cache_trans_view, "kv_cache_trans_view", il);
+                ggml_build_forward_expand(gf, build_mla_latent_cache_write(ctx0, kv_self, il, kv_compressed,
+                        n_tokens, kv_self.size, kv_lora_rank, kv_head, cb));
 
                 // note: storing transposed c^KV in the transposed KV cache
-                ggml_build_forward_expand(gf, ggml_cpy(ctx0, ggml_transpose(ctx0, kv_compressed), kv_cache_trans_view));
-
-                kv_cache_trans = ggml_view_2d(ctx0, kv_self.v_l[il],
-                        n_kv, kv_lora_rank,
-                        ggml_row_size(kv_self.v_l[il]->type, kv_self.size),
-                        0);
-                cb(kv_cache_trans, "kv_cache_trans", il);
+                kv_cache_trans = build_mla_latent_cache_read(ctx0, kv_self, il, nullptr, n_kv,
+                        kv_self.size, kv_lora_rank, true, cb);
             }
 
             //ggml_tensor * kvr = ggml_concat(ctx0, kv_compressed, ggml_permute(ctx0, k_rope, 0, 2, 1, 3), 0);
@@ -1099,8 +1093,8 @@ ggml_tensor * llm_build_context::build_deepseek2_layer_attention(
                                 ggml_row_size(kv_self.k_l[il]->type, n_embd_head_qk_rope));
                         cb(kv_cache, "kv_cache_lora", il);
 
-                        kv_cache_trans = ggml_cont(ctx0, ggml_transpose(ctx0, kv_cache_lora));
-                        cb(kv_cache_trans, "kv_cache_trans", il);
+                        kv_cache_trans = build_mla_latent_cache_read(ctx0, kv_self, il, kv_cache_lora, n_kv,
+                                kv_self.size, kv_lora_rank, false, cb);
                     }
 
                     auto kq_size = kv_cache->ne[1]*q->ne[1]*q->ne[2]*sizeof(float)/(1024*1024); // K*Q in MiB
