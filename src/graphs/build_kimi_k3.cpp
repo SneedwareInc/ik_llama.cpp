@@ -136,8 +136,11 @@ static ggml_tensor * k3_build_mla(
 
     const bool mla_v_cache = lctx.cparams.mla_attn == 1 && !lctx.cparams.flash_attn;
     if (mla_v_cache) {
-        ggml_build_forward_expand(gf, llm_build_context::build_mla_latent_cache_write(ctx0, kv_self, il, kv_cmpr,
-                n_tokens, kv_self.rows(il), kv_lora_rank, llm.kv_head, cb));
+        ggml_tensor * v_write = ggml_view_2d(ctx0, kv_self.v_l[il], n_tokens, kv_lora_rank,
+                ggml_row_size(kv_self.v_l[il]->type, kv_self.rows(il)),
+                ggml_row_size(kv_self.v_l[il]->type, llm.kv_head));
+        cb(v_write, "kv_cache_trans_view", il);
+        ggml_build_forward_expand(gf, ggml_cpy(ctx0, ggml_transpose(ctx0, kv_cmpr), v_write));
     }
 
     ggml_tensor * K = ggml_view_2d(ctx0, kv_self.k_l[il], k_row, llm.n_kv, cache_row_bytes, 0);
@@ -163,8 +166,14 @@ static ggml_tensor * k3_build_mla(
         }
         kq = ggml_soft_max_ext(ctx0, kq, KQ_mask, kq_scale, hparams.f_max_alibi_bias);
         cb(kq, "kq", il);
-        ggml_tensor * VP = llm_build_context::build_mla_latent_cache_read(ctx0, kv_self, il, V, llm.n_kv,
-                kv_self.rows(il), kv_lora_rank, mla_v_cache, cb);
+        ggml_tensor * VP;
+        if (mla_v_cache) {
+            VP = ggml_view_2d(ctx0, kv_self.v_l[il], llm.n_kv, kv_lora_rank,
+                    ggml_row_size(kv_self.v_l[il]->type, kv_self.rows(il)), 0);
+        } else {
+            VP = ggml_cont(ctx0, ggml_transpose(ctx0, V));
+        }
+        cb(VP, "kv_cache_trans", il);
         attn = ggml_mul_mat(ctx0, VP, kq);
     }
     cb(attn, "mla_attn_out", il);
