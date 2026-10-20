@@ -473,13 +473,6 @@ struct llm_build_context {
     static ggml_tensor * build_mla_output_gate(llama_context & lctx, ggml_context * ctx0,
             ggml_tensor * output, ggml_tensor * input, ggml_tensor * gate_w,
             int64_t head_dim, int64_t n_head, int il, const llm_build_cb & cb);
-    static ggml_tensor * build_mla_latent_cache_write(ggml_context * ctx, const llama_kv_cache & kv, int il,
-            ggml_tensor * latent, int64_t n_tokens, int64_t n_rows, int64_t kv_lora_rank, int64_t kv_head,
-            const llm_build_cb & cb);
-
-    static ggml_tensor * build_mla_latent_cache_read(ggml_context * ctx, const llama_kv_cache & kv, int il,
-            ggml_tensor * latent_cached, int64_t n_kv, int64_t n_rows, int64_t kv_lora_rank, bool use_v_cache,
-            const llm_build_cb & cb);
 
     static ggml_tensor * llm_build_lora_mm_id(llama_context & lctx, ggml_context * ctx0,
           ggml_tensor * w, ggml_tensor * cur, ggml_tensor * ids,

@@ -1097,45 +1097,6 @@ ggml_tensor * llm_build_context::llm_build_lora_mm(
     return res;
 }
 
-ggml_tensor * llm_build_context::build_mla_latent_cache_write(
-        ggml_context * ctx, const llama_kv_cache & kv, int il,
-        ggml_tensor * latent, int64_t n_tokens, int64_t n_rows, int64_t kv_lora_rank, int64_t kv_head,
-        const llm_build_cb & cb) {
-    GGML_ASSERT(il >= 0 && il < (int) kv.v_l.size());
-    GGML_ASSERT(kv.v_l[il] != nullptr);
-    GGML_ASSERT(latent != nullptr);
-    GGML_ASSERT(kv_lora_rank > 0 && n_rows >= n_tokens + kv_head);
-    GGML_ASSERT(ggml_nbytes(kv.v_l[il]) == (size_t) ggml_row_size(kv.v_l[il]->type, kv_lora_rank)*n_rows);
-    GGML_ASSERT(latent->ne[0] == kv_lora_rank);
-
-    ggml_tensor * v_cache_view = ggml_view_2d(ctx, kv.v_l[il], n_tokens, kv_lora_rank,
-            ggml_row_size(kv.v_l[il]->type, n_rows), ggml_row_size(kv.v_l[il]->type, kv_head));
-    cb(v_cache_view, "kv_cache_trans_view", il);
-
-    return ggml_cpy(ctx, ggml_transpose(ctx, latent), v_cache_view);
-}
-
-ggml_tensor * llm_build_context::build_mla_latent_cache_read(
-        ggml_context * ctx, const llama_kv_cache & kv, int il,
-        ggml_tensor * latent_cached, int64_t n_kv, int64_t n_rows, int64_t kv_lora_rank, bool use_v_cache,
-        const llm_build_cb & cb) {
-    if (use_v_cache) {
-        GGML_ASSERT(il >= 0 && il < (int) kv.v_l.size());
-        GGML_ASSERT(kv.v_l[il] != nullptr);
-        GGML_ASSERT(n_rows >= n_kv);
-        ggml_tensor * v_cache_trans = ggml_view_2d(ctx, kv.v_l[il], n_kv, kv_lora_rank,
-                ggml_row_size(kv.v_l[il]->type, n_rows), 0);
-        cb(v_cache_trans, "kv_cache_trans", il);
-        return v_cache_trans;
-    }
-
-    GGML_ASSERT(latent_cached != nullptr);
-    GGML_ASSERT(latent_cached->ne[0] == kv_lora_rank);
-    ggml_tensor * v_cache_trans = ggml_cont(ctx, ggml_transpose(ctx, latent_cached));
-    cb(v_cache_trans, "kv_cache_trans", il);
-    return v_cache_trans;
-}
-
 ggml_tensor * llm_build_context::build_mla_output_gate(
         llama_context & lctx,
         ggml_context * ctx0,
